@@ -2,4 +2,4 @@
 
 The code for the paper: "Local Frequency Domain Transformer Networks for Video Prediction"
 
-Coming soon!
+## Please note that this repository needs modification and is not fully ready to use.
