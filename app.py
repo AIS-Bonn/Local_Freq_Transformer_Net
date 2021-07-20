@@ -6,10 +6,10 @@ import time
 import ast
 import random as rand
 import numpy as np
-from lftdn.dataloaders import get_data_loaders
-from lftdn.train_step import predict
-from lftdn.transform_models import cellTransportRefine,phaseDiffModel
-from lftdn.window_func import get_pascal_window, get_ACGW, get_2D_Gaussian
+from lfdtn.dataloaders import get_data_loaders
+from lfdtn.train_step import predict
+from lfdtn.transform_models import cellTransportRefine,phaseDiffModel
+from lfdtn.window_func import get_pascal_window, get_ACGW, get_2D_Gaussian
 from asset.utils import generate_name, dmsg, CombinedLossDiscounted,wandblog,DenseNetLikeModel,niceL2S,setIfAugmentData
 from past.builtins import execfile
 from colorama import Fore
@@ -17,8 +17,8 @@ from tqdm import tqdm
 import torch
 import click
 
-execfile('lftdn/helpers.py')  # This is instead of 'from asset.helpers import *', to have loadModels and saveModels
-
+execfile('lfdtn/helpers.py')  # This is instead of 'from asset.helpers import *', to have loadModels and saveModels
+# access global variable.
 
 torch.utils.backcompat.broadcast_warning.enabled = True
 
@@ -27,13 +27,13 @@ print("PyTorch Version:", torch.__version__)
 print("Cuda Version:", torch.version.cuda)
 print("CUDNN Version:", torch.backends.cudnn.version())
 
-
+# This will make some functions faster It will automatically choose between: 
+# https://github.com/pytorch/pytorch/blob/1848cad10802db9fa0aa066d9de195958120d863/aten/src/ATen/native/cudnn/Conv
+# .cpp#L486-L494 
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.enabled = True
 
-
 worker_init_fn = None
-
 
 hyperparameter_defaults = dict(
     dryrun=False,
@@ -131,9 +131,10 @@ hyperparameter_defaults = dict(
     segmentation=True,
     enable_autoregressive_prediction=False,
     update_T_just_by_FG = False,
+    useBN=False,
+    initW=True,
     cmd=""
 )
-
 
 try:
     print("WANDB_CONFIG_PATHS = ", os.environ["WANDB_CONFIG_PATHS"])
@@ -191,7 +192,7 @@ for a in sys.argv:
             pass
 config = wandb.config
 wandb.save('asset/*')
-wandb.save('lftdn/*')
+wandb.save('lfdtn/*')
 
 if  config.dublicate_PD_from_tr:
     config.update({'PD_model_filters': config.tran_filters}, allow_val_change=True)
@@ -307,7 +308,7 @@ print("}")
 critBCE = torch.nn.BCELoss()
 critL1 = torch.nn.L1Loss()
 critL2 = torch.nn.MSELoss()
-critSSIM = kornia.losses.SSIM(window_size=9, reduction='mean')
+critSSIM = kornia.losses.SSIMLoss(window_size=9, reduction='mean')
 critHybrid = CombinedLossDiscounted()
 
 LG_Sigma_A = None
@@ -335,6 +336,10 @@ chennelC = 3 if config.color else 1
 if config.segmentation:
     if config.init_A_with_T:
         LG_Sigma_A = torch.tensor(0.45, requires_grad=True, device=avDev)
+        if "NGSIM" in config.data_key:
+            LG_Sigma_A = torch.tensor(0.1278, requires_grad=True, device=avDev)
+        elif "MotionSegmentation" == config.data_key:
+            LG_Sigma_A = torch.tensor(0.2188, requires_grad=True, device=avDev)
         paramN.append('LG_Sigma_A')
         minLR.append(config.gain_update_lr)
         wD.append(10e-12)
@@ -346,18 +351,30 @@ if config.segmentation:
 
     #Learnable Gain Update Spatials (A,FG,BG). It will be used with sigmoid. Default after sigmoid = 0.5
     LG_UpdS = torch.zeros(3,config.sequence_length, requires_grad=True, device=avDev)
+    if "NGSIM" in config.data_key and config.sequence_length==10:
+        LG_UpdS = torch.tensor([[ 4.6171,  5.2717, 10.1665, 11.3596, 12.2106,  0.0000,  0.0000,  0.0000, 0.0000,  0.0000],  [11.2458, 12.9779, 14.4671, 14.7118, 15.8778,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000],  [ 9.7147,  6.8452,  0.8428,  0.5595,  0.6800,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]], requires_grad=True, device=avDev)
+    elif "MotionSegmentation" == config.data_key and config.sequence_length==10:
+        LG_UpdS = torch.tensor([[-1.1536,  0.1880,  7.0582,  5.2182,  7.0127,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000],  [ 5.1158,  6.8903, 10.4487,  9.6647, 12.1630,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000],  [-6.5552,  0.2025,  1.7952,  1.6631,  2.9506,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]], requires_grad=True, device=avDev)
     paramN.append('LG_UpdS')
     minLR.append(config.gain_update_lr)
     wD.append(10e-12)
 
     #Learnable Gain Update Transformation (T). It will be used with sigmoid. Default after sigmoid = 0.5
     LG_UpdT = torch.zeros(1,config.sequence_length, requires_grad=True, device=avDev)
+    if "NGSIM" in config.data_key and config.sequence_length==10:
+        LG_UpdT = torch.tensor([[ 0.0000,  0.1049,  1.5577,  0.1450, -0.0979,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]], requires_grad=True, device=avDev)
+    elif "MotionSegmentation" == config.data_key and config.sequence_length==10:
+        LG_UpdT = torch.tensor([[ 0.0000, -2.5745,  0.5905,  0.1705,  0.0219,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]], requires_grad=True, device=avDev)
     paramN.append('LG_UpdT')
     minLR.append(config.gain_update_lr)
     wD.append(0)
 
     #Learnable Gain to between PDFG and PDA. It will be used with sigmoid. Default after sigmoid = 0.5
     LG_TeS = torch.zeros(1,config.sequence_length, requires_grad=True, device=avDev)
+    if "NGSIM" in config.data_key and config.sequence_length==10:
+        LG_TeS = torch.tensor([[0.3233, 0.3762, 0.2739, 3.8217, 1.2684, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]], requires_grad=True, device=avDev)
+    elif "MotionSegmentation" == config.data_key and config.sequence_length==10:
+        LG_TeS = torch.tensor([[-1.1181, -5.4842, -0.2704, -0.1654, -0.9836,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]], requires_grad=True, device=avDev)
     paramN.append('LG_TeS')
     minLR.append(config.gain_update_lr)
     wD.append(0)
@@ -370,13 +387,13 @@ if config.segmentation:
 
 
     MRef_A = DenseNetLikeModel(inputC=1,outputC=1,layerCount=config.MRef_A_layer_cnt, hiddenF=config.MRef_A_hidden_unit,
-                                filterS=config.MRef_A_filter_size,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)
+                                filterS=config.MRef_A_filter_size,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)
     paramN.append('MRef_A')
     minLR.append(config.refine_lr)
     wD.append(config.refine_wd)
 
     MRef_FG = DenseNetLikeModel(inputC=chennelC,outputC=chennelC,layerCount=config.MRef_FG_layer_cnt, hiddenF=config.MRef_FG_hidden_unit,
-                                filterS=config.MRef_FG_filter_size,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)
+                                filterS=config.MRef_FG_filter_size,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)
     paramN.append('MRef_FG')
     minLR.append(config.refine_lr)
     wD.append(config.refine_wd)
@@ -385,7 +402,7 @@ if config.segmentation:
         MRef_BG = MRef_FG
     else:
         MRef_BG = DenseNetLikeModel(inputC=chennelC,outputC=chennelC,layerCount=config.MRef_BG_layer_cnt, hiddenF=config.MRef_BG_hidden_unit,
-                                    filterS=config.MRef_BG_filter_size,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)
+                                    filterS=config.MRef_BG_filter_size,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)
         paramN.append('MRef_BG')
         minLR.append(config.refine_lr)
         wD.append(config.refine_wd)
@@ -396,7 +413,7 @@ if config.segmentation:
             MRef_Out = MRef_FG
         else:
             MRef_Out = DenseNetLikeModel(inputC=chennelC,outputC=chennelC,layerCount=config.refine_layer_cnt, hiddenF=config.refine_hidden_unit,
-                                        filterS=config.refine_filter_size,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)
+                                        filterS=config.refine_filter_size,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)
             paramN.append('MRef_Out')
             minLR.append(config.refine_lr)
             wD.append(config.refine_wd)
@@ -405,7 +422,7 @@ if config.segmentation:
 
     M_A = DenseNetLikeModel(inputC=chennelC+1 if config.init_A_with_T else chennelC,outputC=1,layerCount=config.refine_layer_cnt_a, hiddenF=config.refine_hidden_unit,
                             filterS=config.refine_filter_size,gain=0.4#to make sure we start with blank A
-                            ,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)
+                            ,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)
     paramN.append('M_A')
     minLR.append(config.refine_lr)
     wD.append(config.refine_wd)
@@ -415,7 +432,7 @@ if config.segmentation:
         M_BG = MRef_FG
     else:
         M_BG = DenseNetLikeModel(inputC=inpC,outputC=chennelC,layerCount=config.refine_layer_cnt, hiddenF=config.refine_hidden_unit,
-                                filterS=config.refine_filter_size,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)#One for input one for Alpha
+                                filterS=config.refine_filter_size,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)#One for input one for Alpha
         paramN.append('M_BG')
         minLR.append(config.refine_lr)
         wD.append(config.refine_wd)
@@ -423,7 +440,7 @@ if config.segmentation:
 else:
     if config.refine_output:
         MRef_Out = DenseNetLikeModel(inputC=chennelC,outputC=chennelC,layerCount=config.refine_layer_cnt, hiddenF=config.refine_hidden_unit,
-                                    filterS=config.refine_filter_size,nonlin=config.ref_non_lin,lastNonLin=False).to(avDev)
+                                    filterS=config.refine_filter_size,nonlin=config.ref_non_lin,lastNonLin=False,initW=config.initW,bn=config.useBN).to(avDev)
         paramN.append('MRef_Out')
         minLR.append(config.refine_lr)
         wD.append(config.refine_wd)

@@ -1,9 +1,9 @@
 import torch
 import wandb
-from lftdn.LFT import compact_LFT, compact_iLFT
+from lfdtn.LFT import compact_LFT, compact_iLFT
 from asset.utils import getPhaseDiff, getPhaseAdd, clmp, listToTensor, showSeq, dimension, li, ui, show_phase_diff, \
     logMultiVideo, wandblog,dmsg,getAvgDiff,manyListToTensor
-from lftdn.window_func import  get_2D_Gaussian,get_ACGW
+from lfdtn.window_func import  get_2D_Gaussian,get_ACGW
 from torch.functional import F
 
 def getOneC(inp,dim=2):

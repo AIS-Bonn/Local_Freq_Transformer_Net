@@ -1,6 +1,6 @@
 import torch
 import os
-from lftdn.LFT import LFT, iLFT
+from lfdtn.LFT import LFT, iLFT
 from asset.utils import getPhaseAdd, getPhaseDiff
 from colorama import Fore
 

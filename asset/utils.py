@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import random
 from datetime import datetime
 from math import exp
 import imageio
@@ -25,7 +26,7 @@ from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 import time
 import pandas as pd
-from lftdn.complex_ops import complex_div, complex_abs, complex_conj, complex_mul
+from lfdtn.complex_ops import complex_div, complex_abs, complex_conj, complex_mul
 
 wandbLog = {}
 wandbC = 0
@@ -929,6 +930,20 @@ def ssim(img1, img2, window_size=11, size_average=True):
 
     return _ssim(img1, img2, window, window_size, channel, size_average)
 
+def random_split(dataset, indices,shuffle=True):
+    ratio = [f/sum(indices) for f in indices]
+    dsIdx=dataset.frameVideo
+    portion = len(ratio)
+    fIndx = [[] for i in range(portion)]
+    for d in dsIdx:
+        curS,curL=d[0],d[1]-d[0]
+        st = curS
+        for f in range(portion):
+            t = int(curL*ratio[f])
+            l= list(range(st,st+t))
+            fIndx[f]+=l
+            st+=t
+    return [torch.utils.data.Subset(dataset,f if not shuffle else random.sample(f, k=len(f))) for f in fIndx]
 
 from IPython.display import Image
 from IPython.display import Markdown
@@ -1199,7 +1214,7 @@ class CombinedLossDiscounted(torch.nn.Module):
         super(CombinedLossDiscounted, self).__init__()
         self.alpha = alpha
         self.window_size = window_size
-        self.loss_function_structural = kornia.losses.SSIM(window_size, reduction='none')
+        self.loss_function_structural = kornia.losses.SSIMLoss(window_size, reduction='none')
         self.loss_function_pixel_wise = nn.L1Loss(reduction='none')
         self.gamma = 0.9
 
@@ -1213,6 +1228,90 @@ class CombinedLossDiscounted(torch.nn.Module):
 
 def generate_name():
     return datetime.now().strftime("%d-%m-%Y_%H_%M")
+
+#from https://github.com/tomrunia/OpticalFlow_Visualization
+def make_colorwheel():
+    """
+    Generates a color wheel for optical flow visualization as presented in:
+        Baker et al. "A Database and Evaluation Methodology for Optical Flow" (ICCV, 2007)
+        URL: http://vision.middlebury.edu/flow/flowEval-iccv07.pdf
+    Code follows the original C++ source code of Daniel Scharstein.
+    Code follows the the Matlab source code of Deqing Sun.
+    Returns:
+        np.ndarray: Color wheel
+    """
+
+    RY = 15
+    YG = 6
+    GC = 4
+    CB = 11
+    BM = 13
+    MR = 6
+
+    ncols = RY + YG + GC + CB + BM + MR
+    colorwheel = np.zeros((ncols, 3))
+    col = 0
+
+    # RY
+    colorwheel[0:RY, 0] = 255
+    colorwheel[0:RY, 1] = np.floor(255*np.arange(0,RY)/RY)
+    col = col+RY
+    # YG
+    colorwheel[col:col+YG, 0] = 255 - np.floor(255*np.arange(0,YG)/YG)
+    colorwheel[col:col+YG, 1] = 255
+    col = col+YG
+    # GC
+    colorwheel[col:col+GC, 1] = 255
+    colorwheel[col:col+GC, 2] = np.floor(255*np.arange(0,GC)/GC)
+    col = col+GC
+    # CB
+    colorwheel[col:col+CB, 1] = 255 - np.floor(255*np.arange(CB)/CB)
+    colorwheel[col:col+CB, 2] = 255
+    col = col+CB
+    # BM
+    colorwheel[col:col+BM, 2] = 255
+    colorwheel[col:col+BM, 0] = np.floor(255*np.arange(0,BM)/BM)
+    col = col+BM
+    # MR
+    colorwheel[col:col+MR, 2] = 255 - np.floor(255*np.arange(MR)/MR)
+    colorwheel[col:col+MR, 0] = 255
+    return colorwheel
+
+#from https://github.com/tomrunia/OpticalFlow_Visualization
+def flow_uv_to_colors(u, v, convert_to_bgr=False):
+    """
+    Applies the flow color wheel to (possibly clipped) flow components u and v.
+    According to the C++ source code of Daniel Scharstein
+    According to the Matlab source code of Deqing Sun
+    Args:
+        u (np.ndarray): Input horizontal flow of shape [H,W]
+        v (np.ndarray): Input vertical flow of shape [H,W]
+        convert_to_bgr (bool, optional): Convert output image to BGR. Defaults to False.
+    Returns:
+        np.ndarray: Flow visualization image of shape [H,W,3]
+    """
+    flow_image = np.zeros((u.shape[0], u.shape[1], 3), np.uint8)
+    colorwheel = make_colorwheel()  # shape [55x3]
+    ncols = colorwheel.shape[0]
+    rad = np.sqrt(np.square(u) + np.square(v))
+    a = np.arctan2(-v, -u)/np.pi
+    fk = (a+1) / 2*(ncols-1)
+    k0 = np.floor(fk).astype(np.int32)
+    k1 = k0 + 1
+    k1[k1 == ncols] = 0
+    f = fk - k0
+    for i in range(colorwheel.shape[1]):
+        tmp = colorwheel[:,i]
+        col0 = tmp[k0] / 255.0
+        col1 = tmp[k1] / 255.0
+        col = (1-f)*col0 + f*col1
+        idx = False#(rad <= 1)
+        col[idx]  = 1 - rad[idx] * (1-col[idx])
+        col[~idx] = col[~idx] * 0.75   # out of range
+        # Note the 2-i => BGR instead of RGB
+        ch_idx = 2-i if convert_to_bgr else i
+        flow_image[:,:,ch_idx] = np.floor(255 * col)
+    return flow_image
 
 
 ###Superimposes the local shifts encoded in the phase diffs on the (ground truth) image frames
@@ -1248,9 +1347,15 @@ def show_phase_diff(pd_list, gt, config, title,clear_motion=False):
                 axT[i].imshow(img, cmap=cmap,vmin=0,vmax=1)
             with torch.no_grad():
                 visY, visX = pd_list[0]
+                ###DIFF: THESE NEXT TWO LINES AND THE 'color' ARGUMENT, SET TO THE CONTENTS OF 'colors'	
+                ###Note the minus sign before visY!	
+                colors = flow_uv_to_colors(visX[0].detach().cpu().numpy(), -visY[0].detach().cpu().numpy()).reshape((-1,3))	
+                colors = colors / 255.
+
                 if clear_motion:
                     visX=torch.zeros_like(visX)
                     visY=torch.zeros_like(visY)
+                    colors='r'
             L_y = visY.shape[-2]
             L_x = visY.shape[-1]
             mmx = np.arange(0 - offset, config.stride * L_x - offset, config.stride) + 1
@@ -1262,15 +1367,17 @@ def show_phase_diff(pd_list, gt, config, title,clear_motion=False):
         else:
             with torch.no_grad():
                 visY, visX = pd_list[i - 1]
+                colors = flow_uv_to_colors(visX[0].detach().cpu().numpy(), -visY[0].detach().cpu().numpy()).reshape((-1,3))	
+                colors = colors / 255.
                 if clear_motion:
                     visX=torch.zeros_like(visX)
                     visY=torch.zeros_like(visY)
             ax.imshow(img, cmap=cmap,vmin=0,vmax=1)
-            ax.quiver(xx, yy, visX[0].cpu(), visY[0].cpu(), color='r', scale=2.5 / config.stride,
+            ax.quiver(xx, yy, visX[0].cpu(), visY[0].cpu(), color=colors, scale=2.5 / config.stride,
                     units='xy')  # scale is important here, might have to adjust to each dataset #, pivot='mid'
             if showStillVisualization:
                 axT[i].imshow(img, cmap=cmap,vmin=0,vmax=1)
-                axT[i].quiver(xx, yy, visX[0].cpu(), visY[0].cpu(), color='r', scale=2.5 / config.stride,
+                axT[i].quiver(xx, yy, visX[0].cpu(), visY[0].cpu(), color=colors, scale=2.5 / config.stride,
                               units='xy')  # scale is important here, might have to adjust to each dataset #, pivot='mid'
             figs.append(torch.from_numpy(get_img_from_fig(fig)).permute(2, 0, 1).unsqueeze(0).unsqueeze(0).clone())
 
@@ -1280,6 +1387,7 @@ def show_phase_diff(pd_list, gt, config, title,clear_motion=False):
             visY.abs().max()) + " max_x = " + str(visX.abs().max()))})
     plt.close('all')
     return None
+
 
 def positionalencoding2d(d_model, height, width):
     """
@@ -1306,26 +1414,33 @@ def positionalencoding2d(d_model, height, width):
     return pe
 
 
-
 class DenseNetLikeModel(nn.Module):
-    def __init__(self, inputC,outputC, layerCount=4, hiddenF=24, filterS=3,gain=1,nonlin='ReLU',lastNonLin=False):
+    def __init__(self, inputC,outputC, layerCount=4, hiddenF=24, filterS=3,gain=1,nonlin='ReLU',lastNonLin=False,initW=True,bn=False):
         super().__init__()
         self.layerC = layerCount
         self.convS = []
         for c in range(self.layerC):
             filt = filterS if type(filterS) ==int else filterS[c]
-            self.convS.append(nn.Conv2d(in_channels=inputC + (c * hiddenF),
-                                        out_channels=hiddenF if c < (self.layerC - 1) else outputC,
-                                        kernel_size=filt, stride=1, padding=filt//2))
-            with torch.no_grad():
-                self.convS[-1].weight.data *= 0.001
-                mid = self.convS[-1].weight.shape[2] // 2
-                self.convS[-1].weight.data[:, :, mid, mid] = (1. / (self.convS[-1].in_channels))*gain
-                self.convS[-1].bias.data *= 0.001
+            outc = hiddenF if c < (self.layerC - 1) else outputC
+            convv = nn.Conv2d(in_channels=inputC + (c * hiddenF),
+                                        out_channels=outc,
+                                        kernel_size=filt, stride=1, padding=filt//2)
+            if initW:
+                with torch.no_grad():
+                    convv.weight.data *= 0.001
+                    mid = convv.weight.shape[2] // 2
+                    convv.weight.data[:, :, mid, mid] = (1. / (convv.in_channels))*gain
+                    convv.bias.data *= 0.001
+            if bn and (c < (self.layerC - 1) or lastNonLin):
+                seq = [convv]
+                seq.append(nn.BatchNorm2d(outc))
+                self.convS.append(nn.Sequential(*seq))
+            else:
+                self.convS.append(convv)
         self.convS = nn.ModuleList(self.convS)
         
         self.nonLin = eval('torch.nn.'+nonlin+"()") #https://pytorch.org/docs/master/nn.html#non-linear-activations-weighted-sum-nonlinearity
-        self.lastNonLin = False
+        self.lastNonLin = lastNonLin
     def forward(self, inp):
         res = []
         for c in range(self.layerC):

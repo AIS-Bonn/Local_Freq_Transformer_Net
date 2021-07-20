@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from asset.utils import getAvgDiff, createPhaseDiff, justshift, get_delta,positionalencoding2d,dmsg,DenseNetLikeModel
-from lftdn.custom_fft import custom_fft
+from lfdtn.custom_fft import custom_fft
 
 
 class cellTransportRefine(nn.Module):

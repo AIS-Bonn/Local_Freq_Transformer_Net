@@ -1,7 +1,7 @@
 from torch.functional import F
 import torch.nn as nn
 from asset.utils import getPhaseAdd,dmsg
-from lftdn.custom_fft import custom_ifft, custom_fft
+from lfdtn.custom_fft import custom_ifft, custom_fft
 
 
 def fold(T, res_y: int, res_x: int, y_stride: int, x_stride: int, cell_size: int, pad_size: int):

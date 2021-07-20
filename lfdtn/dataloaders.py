@@ -4,6 +4,7 @@ import cv2
 import json
 import os
 from typing import List, Tuple
+import asset
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
 from asset.utils import dmsg,getIfAugmentData
 import imgaug.augmenters as iaa
@@ -71,6 +72,8 @@ class MovingFGeSOnBGDataset(Dataset):
 
     def __getitem__(self, idx):
         foreground_objs = []
+        random.seed(idx)
+        np.random.seed(idx)
         for _ in range(self.digitCount):
             mnistdig=self.MNIST.__getitem__(random.randint(0, len(self.MNIST) - 1))[0]
             mnistdig = np.array(mnistdig)[ :, :,np.newaxis]
@@ -201,9 +204,8 @@ sequenceFileDict = {
     'circle_sanity_2_px': 'canvas_circle_int_up_2.pt'
 }
 
-
 class sequenceData(Dataset):
-    def __init__(self, key='rot_lin_scale_2', device=torch.device('cpu'), size=(65, 65), sequence_length=10,color=False):
+    def __init__(self, config,key='rot_lin_scale_2', device=torch.device('cpu'), size=(65, 65), sequence_length=10,color=False):
         self.key = key
         self.dict = sequenceFileDict
         if key in self.dict:
@@ -216,122 +218,57 @@ class sequenceData(Dataset):
         self.size = size[::-1]
         self.sequence_length = sequence_length
         self.color = color
+        self.config =config
     def __getitem__(self, ind):
-        res = torch.nn.functional.interpolate(self.data[ind].unsqueeze(1).to(self.dev), size=self.size,
+        if len(self.data.shape)==4:
+            data = self.data[ind].unsqueeze(1).to(self.dev)
+        else:
+            data = self.data[ind].to(self.dev)
+        res = torch.nn.functional.interpolate(data, size=self.size,
                                         mode='bilinear', align_corners=False)[:self.sequence_length]
+
         if res.shape[1]==1 and self.color:
             res = res.expand(res.shape[0],3,res.shape[2],res.shape[3])
         elif res.shape[1]==3 and not self.color:
-            res[:,:] = res[:,0:1]
+            res,_ = res.max(dim=1)
+            res=res.unsqueeze(1)
         return res
     def __len__(self):
         return self.len
 
+class savedData(Dataset):
+    def __init__(self,data,device=torch.device('cpu'), size=(65, 65),limit=1):
+        self.data = data
+        self.limit=limit
+        self.dev = device
+        self.size = size[::-1]
+    def reshape(self,inp):
+        shp=inp.shape
+        if len(shp)>4:
+            return torch.nn.functional.interpolate(inp.reshape(-1,1,shp[-2],shp[-1]), size=self.size,
+                                            mode='bilinear', align_corners=False).reshape(shp[:-2]+self.size)
+        elif len(shp)>3:
+            return torch.nn.functional.interpolate(inp, size=self.size,
+                                            mode='bilinear', align_corners=False)
+    def __getitem__(self, ind):
+        res = self.data[ind]
+        if res is dict:
+            for it in res.keys():
+                res[it] = self.reshape(res[it])
+            return res
+        else:
+            return self.reshape(res)
 
+    def __len__(self):
+        return int(len(self.data)*self.limit)
+
+def worker_init_fn(worker_id):                                                          
+    np.random.seed(np.random.get_state()[1][0] + worker_id)
+    
 def get_data_loaders(config, key='rot_lin_scale_2', size=(65, 65), ratio=[0.15,0.15], batch_size=1,test_batch_size=1, num_workers=1,
                      device=torch.device('cpu'), limit=1, sequence_length=10):
 
-    if key == 'NGSIMSep':
-        fileNames = [
-            'data/NGSIM/peachtree-camera5-1245pm-0100pm.avi',
-            'data/NGSIM/peachtree-camera2-1245pm-0100pm.avi',
-            'data/NGSIM/nb-camera7-0400pm-0415pm.avi',
-            'data/NGSIM/lankershim-camera4-0830am-0845am.avi',
-            'data/NGSIM/lankershim-camera5-0830am-0845am.avi',#OLD
-            'data/NGSIM/peachtree-camera1-1245pm-0100pm.avi',
-            'data/NGSIM/nb-camera6-0400pm-0415pm.avi',
-            'data/NGSIM/peachtree-camera3-1245pm-0100pm.avi',
-            'data/NGSIM/peachtree-camera4-1245pm-0100pm.avi',
-            'data/NGSIM/nb-camera5-0400pm-0415pm.avi'
-        ]
-
-        dataset = VideoLoader(fileLoc=fileNames[:-4], fCount=sequence_length,
-                           sampleRate=(1, 1), size=size,color=config.color)
-
-        dlen = len(dataset)
-        limitedDlen = int(dlen * limit)
-        tr_ds,_=torch.utils.data.random_split(dataset,
-                                    [limitedDlen, dlen-(limitedDlen)])
-        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers, shuffle=True)
-
-        dataset = VideoLoader(fileLoc=fileNames[-4:-2], fCount=sequence_length,
-                           sampleRate=(1, 1), size=size,color=config.color)
-        dlen = len(dataset)
-        limitedDlen = int(dlen * limit)
-        va_ds,_=torch.utils.data.random_split(dataset,
-                                    [limitedDlen, dlen-(limitedDlen)])
-        valid_loader = DataLoader(va_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False)
-
-
-        dataset = VideoLoader(fileLoc=fileNames[-2:], fCount=sequence_length,
-                           sampleRate=(1, 1), size=size,color=config.color)
-        dlen = len(dataset)
-        limitedDlen = int(dlen * limit)
-        te_ds,_=torch.utils.data.random_split(dataset,
-                                    [limitedDlen, dlen-(limitedDlen)])
-        test_loader = DataLoader(te_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False)
-
-    elif 'SimpleNGSIM' in key:
-        if 'SimpleNGSIM2'== key:
-            fileNames = [
-                'data/NGSIM/nb-camera5-0400pm-0415pm.avi',
-                'data/NGSIM/nb-camera6-0400pm-0415pm.avi'
-            ]
-        else:
-            fileNames = [
-                'data/NGSIM/nb-camera5-0400pm-0415pm.avi'
-            ]
-
-        dataset = VideoLoader(fileLoc=fileNames, fCount=sequence_length,
-                           sampleRate=(1, 1), size=size,color=config.color)
-
-        dlen = len(dataset)
-        splitTr = int((1-(ratio[0]+ratio[1]))*dlen)
-        splitVa = int(ratio[0]*dlen)
-        tr_ds,val_ds,test_ds=torch.utils.data.random_split(dataset,
-                                    [splitTr,splitVa, dlen-(splitTr+splitVa)])
-        tr_ds = torch.utils.data.Subset(tr_ds, range(0,int(len(tr_ds)*limit)))
-        val_ds = torch.utils.data.Subset(val_ds, range(0,int(len(val_ds)*limit)))
-        test_ds = torch.utils.data.Subset(test_ds, range(0,int(len(test_ds)*limit)))
-        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers,
-                                  pin_memory=True, shuffle=True)
-        valid_loader = DataLoader(val_ds, batch_size=test_batch_size, num_workers=num_workers,
-                                  pin_memory=False, shuffle=False)
-        test_loader = DataLoader(test_ds, batch_size=test_batch_size, num_workers=num_workers,
-                                  pin_memory=False, shuffle=False)
-    elif key == 'NGSIM':
-        fileNames = [
-            'data/NGSIM/peachtree-camera5-1245pm-0100pm.avi',
-            'data/NGSIM/peachtree-camera2-1245pm-0100pm.avi',
-            'data/NGSIM/nb-camera7-0400pm-0415pm.avi',
-            'data/NGSIM/lankershim-camera4-0830am-0845am.avi',
-            'data/NGSIM/lankershim-camera5-0830am-0845am.avi',#OLD
-            'data/NGSIM/peachtree-camera1-1245pm-0100pm.avi',
-            'data/NGSIM/nb-camera6-0400pm-0415pm.avi',
-            'data/NGSIM/peachtree-camera3-1245pm-0100pm.avi',
-            'data/NGSIM/peachtree-camera4-1245pm-0100pm.avi',
-            'data/NGSIM/nb-camera5-0400pm-0415pm.avi'
-        ]
-
-        dataset = VideoLoader(fileLoc=fileNames, fCount=sequence_length,
-                           sampleRate=(1, 1), size=size,color=config.color)
-
-        dlen = len(dataset)
-        splitTr = int((1-(ratio[0]+ratio[1]))*dlen)
-        splitVa = int(ratio[0]*dlen)
-        tr_ds,val_ds,test_ds=torch.utils.data.random_split(dataset,
-                                    [splitTr,splitVa, dlen-(splitTr+splitVa)])
-        tr_ds = torch.utils.data.Subset(tr_ds, range(0,int(len(tr_ds)*limit)))
-        val_ds = torch.utils.data.Subset(val_ds, range(0,int(len(val_ds)*limit)))
-        test_ds = torch.utils.data.Subset(test_ds, range(0,int(len(test_ds)*limit)))
-        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers,
-                                  pin_memory=True, shuffle=True)
-        valid_loader = DataLoader(val_ds, batch_size=test_batch_size, num_workers=num_workers,
-                                  pin_memory=False, shuffle=False)
-        test_loader = DataLoader(test_ds, batch_size=test_batch_size, num_workers=num_workers,
-                                  pin_memory=False, shuffle=False)
-
-    elif key == 'MotionSegmentation':
+    if key == 'MotionSegmentation':
         dataset = MovingFGeSOnBGDataset(infrencePhase=False, seqLength=sequence_length, shapeX=size[0], shapeY=size[1]
                 ,digitCount = config.digitCount, scale=2, foregroundScale=0.7, blurIt=True,
                  minResultSpeed=2, maxResultSpeed=4,color=config.color)
@@ -341,8 +278,8 @@ def get_data_loaders(config, key='rot_lin_scale_2', size=(65, 65), ratio=[0.15,0
                                     [splitTr, dlen-(splitTr)])
         tr_ds = torch.utils.data.Subset(tr_ds, range(0,int(len(tr_ds)*limit)))
         val_ds = torch.utils.data.Subset(val_ds, range(0,int(len(val_ds)*limit)))
-        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers, shuffle=True)
-        valid_loader = DataLoader(val_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False)
+        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers, shuffle=True,worker_init_fn=worker_init_fn)
+        valid_loader = DataLoader(val_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False,worker_init_fn=worker_init_fn)
 
         dataset = MovingFGeSOnBGDataset(infrencePhase=True, seqLength=sequence_length, shapeX=size[0], shapeY=size[1]
                 ,digitCount = config.digitCount, scale=2, foregroundScale=0.7, blurIt=True,
@@ -351,29 +288,81 @@ def get_data_loaders(config, key='rot_lin_scale_2', size=(65, 65), ratio=[0.15,0
         limitedDlen = int(dlen * limit)
         te_ds,_=torch.utils.data.random_split(dataset,
                                     [limitedDlen, dlen-(limitedDlen)])
-        test_loader = DataLoader(te_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False)
-
+        test_loader = DataLoader(te_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False,worker_init_fn=worker_init_fn)
+    elif key == 'HugeNGSIM':
+        fileNames = [
+            'data/NGSIM/peachtree-camera5-1245pm-0100pm.avi',
+            'data/NGSIM/peachtree-camera2-1245pm-0100pm.avi',
+            'data/NGSIM/nb-camera7-0400pm-0415pm.avi',
+            'data/NGSIM/lankershim-camera4-0830am-0845am.avi',
+            'data/NGSIM/lankershim-camera5-0830am-0845am.avi',
+            'data/NGSIM/peachtree-camera1-1245pm-0100pm.avi',
+            'data/NGSIM/peachtree-camera3-1245pm-0100pm.avi',
+            'data/NGSIM/peachtree-camera4-1245pm-0100pm.avi',
+            'data/NGSIM/nb-camera5-0400pm-0415pm.avi',
+            'data/NGSIM/nb-camera6-0400pm-0415pm.avi'
+        ]
+        dataset = VideoLoader(fileLoc=fileNames[:-4], fCount=sequence_length,
+                           sampleRate=(1, 1), size=size,color=config.color)
+        dlen = len(dataset)
+        limitedDlen = int(dlen * limit)
+        tr_ds,_=torch.utils.data.random_split(dataset,
+                                    [limitedDlen, dlen-(limitedDlen)])
+        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers, shuffle=True,worker_init_fn=worker_init_fn)
+        dataset = VideoLoader(fileLoc=fileNames[-4:-2], fCount=sequence_length,
+                           sampleRate=(1, 1), size=size,color=config.color)
+        dlen = len(dataset)
+        limitedDlen = int(dlen * limit)
+        va_ds,_=torch.utils.data.random_split(dataset,
+                                    [limitedDlen, dlen-(limitedDlen)])
+        valid_loader = DataLoader(va_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False,worker_init_fn=worker_init_fn)
+        dataset = VideoLoader(fileLoc=fileNames[-2:], fCount=sequence_length,
+                           sampleRate=(1, 1), size=size,color=config.color)
+        dlen = len(dataset)
+        limitedDlen = int(dlen * limit)
+        te_ds,_=torch.utils.data.random_split(dataset,
+                                    [limitedDlen, dlen-(limitedDlen)])
+        test_loader = DataLoader(te_ds, batch_size=test_batch_size, num_workers=num_workers, shuffle=False,worker_init_fn=worker_init_fn)
+    elif 'NGSIM' in key:
+        fileNames = [
+            'data/NGSIM/nb-camera5-0400pm-0415pm.avi',
+            'data/NGSIM/nb-camera6-0400pm-0415pm.avi'
+        ]
+        dataset = VideoLoader(fileLoc=fileNames, fCount=sequence_length,
+                           sampleRate=(1, 1), size=size,color=config.color)
+        dlen = len(dataset)
+        splitTr = int((1-(ratio[0]+ratio[1]))*dlen)
+        splitVa = int(ratio[0]*dlen)
+        tr_ds,val_ds,test_ds=asset.utils.random_split(dataset,
+                                    [splitTr,splitVa, dlen-(splitTr+splitVa)])
+        tr_ds = torch.utils.data.Subset(tr_ds, range(0,int(len(tr_ds)*limit)))
+        val_ds = torch.utils.data.Subset(val_ds, range(0,int(len(val_ds)*limit)))
+        test_ds = torch.utils.data.Subset(test_ds, range(0,int(len(test_ds)*limit)))
+        train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers,
+                                  pin_memory=True, shuffle=True,worker_init_fn=worker_init_fn)
+        valid_loader = DataLoader(val_ds, batch_size=test_batch_size, num_workers=num_workers,
+                                  pin_memory=False, shuffle=False,worker_init_fn=worker_init_fn)
+        test_loader = DataLoader(test_ds, batch_size=test_batch_size, num_workers=num_workers,
+                                  pin_memory=False, shuffle=False,worker_init_fn=worker_init_fn)
     else:
-        dataset = sequenceData(key=key, device=device, size=size, sequence_length=sequence_length,color=config.color)
+        dataset = sequenceData(config,key=key, device=device, size=size, sequence_length=sequence_length,color=config.color)
         dlen = len(dataset)
         splitTr = int((1-(ratio[0]+ratio[1]))*dlen)
         splitVa = int(ratio[0]*dlen)
         tr_ds,val_ds,test_ds=torch.utils.data.random_split(dataset,
                                     [splitTr,splitVa, dlen-(splitTr+splitVa)])
-
         tr_ds = torch.utils.data.Subset(tr_ds, range(0,int(len(tr_ds)*limit)))
         val_ds = torch.utils.data.Subset(val_ds, range(0,int(len(val_ds)*limit)))
         test_ds = torch.utils.data.Subset(test_ds, range(0,int(len(test_ds)*limit)))
 
         train_loader = DataLoader(tr_ds, batch_size=batch_size, num_workers=num_workers,
-                                  pin_memory=True, shuffle=True)
+                                  pin_memory=True, shuffle=True,worker_init_fn=worker_init_fn)
         valid_loader = DataLoader(val_ds, batch_size=test_batch_size, num_workers=num_workers,
-                                  pin_memory=False, shuffle=False)
+                                  pin_memory=False, shuffle=False,worker_init_fn=worker_init_fn)
         test_loader = DataLoader(test_ds, batch_size=test_batch_size, num_workers=num_workers,
-                                  pin_memory=False, shuffle=False)
+                                  pin_memory=False, shuffle=False,worker_init_fn=worker_init_fn)
+
     return train_loader, valid_loader, test_loader
-
-
 
 
 class VideoLoader(Dataset):
